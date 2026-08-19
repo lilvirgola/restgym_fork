@@ -9,6 +9,8 @@ WORKDIR /app
 
 COPY src ./src
 
+COPY --from=ghcr.io/astral-sh/uv:0.12.2 /uv /uvx /bin/
+
 RUN pip install --no-cache-dir -r src/requirements.txt
 
 CMD echo "Welcome to the RESTgym Docker image. Please use the restgym.sh script to run this image."

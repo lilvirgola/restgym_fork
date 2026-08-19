@@ -1,3 +1,8 @@
 minimum_cpus: 4
 minimum_ram_gb: 4
-time_budget_mins: 60
+time_budget_mins: 5
+# Mutation testing
+mutation_enabled: true
+campaign_seed: 42
+campaign_budget: 30 # 0 for unlimited budget
+campaign_repetitions: 1

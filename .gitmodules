@@ -34,3 +34,6 @@
 [submodule "tools/schemathesis"]
 	path = tools/schemathesis
 	url = git@github.com:restgym/schemathesis-tool.git
+[submodule "infrastructure/mitmproxy/mutations"]
+	path = infrastructure/mitmproxy/mutations
+	url = https://github.com/lilvirgola/mitm_proxy_plugin

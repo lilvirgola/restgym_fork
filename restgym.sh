@@ -7,7 +7,7 @@ RESTGYM_IMAGE_NAME="restgym"
 RESTGYM_BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 DOCKER_SOCKET_HOST="/var/run/docker.sock"
 DOCKER_SOCKET_CONTAINER="/var/run/docker.sock"
-DOCKER_BASE_COMMAND="$DOCKER_CMD run --rm --name restgym -it -v $DOCKER_SOCKET_HOST:$DOCKER_SOCKET_CONTAINER -v $RESTGYM_BASE_DIR/infrastructure:/app/infrastructure:ro -v $RESTGYM_BASE_DIR/apis:/app/apis:ro -v $RESTGYM_BASE_DIR/tools:/app/tools:ro -v $RESTGYM_BASE_DIR/results:/app/results -v $RESTGYM_BASE_DIR/restgym-config.yml:/app/restgym-config.yml:ro -e RESTGYM_BASE_DIR=$RESTGYM_BASE_DIR $RESTGYM_IMAGE_NAME"
+DOCKER_BASE_COMMAND="$DOCKER_CMD run --rm --name restgym -it -v $DOCKER_SOCKET_HOST:$DOCKER_SOCKET_CONTAINER -v $RESTGYM_BASE_DIR/infrastructure:/app/infrastructure -v $RESTGYM_BASE_DIR/apis:/app/apis -v $RESTGYM_BASE_DIR/tools:/app/tools:ro -v $RESTGYM_BASE_DIR/results:/app/results -v $RESTGYM_BASE_DIR/restgym-config.yml:/app/restgym-config.yml:ro -e RESTGYM_BASE_DIR=$RESTGYM_BASE_DIR $RESTGYM_IMAGE_NAME"
 
 
 # Check if Docker is installed, else exit
