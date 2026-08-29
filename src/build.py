@@ -8,10 +8,6 @@ import multiprocessing
 import concurrent.futures
 from rich import print
 
-
-# ---------------------------------------------------------------------------
-# Docker image management (original)
-# ---------------------------------------------------------------------------
 def clean_builds():
     print("Removing old images...")
     images = common.get_apis() + common.get_tools()
@@ -59,10 +55,6 @@ def build_all():
         for image in images:
             build(image)
 
-
-# ---------------------------------------------------------------------------
-# CAMPAIGN: generate mutation campaigns for all APIs
-# ---------------------------------------------------------------------------
 def generate_campaigns_for_all_apis(seed=42, disabled_operators="", force=False):
     """
     Generate mutation campaigns for every enabled API by calling
@@ -171,10 +163,6 @@ def generate_campaigns_for_all_apis(seed=42, disabled_operators="", force=False)
 
     return error_count == 0
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     common.welcome()
     print("This is the build module.")

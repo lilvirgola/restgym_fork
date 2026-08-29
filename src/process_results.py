@@ -4,6 +4,7 @@ import sys
 import sqlite3
 import json
 import re
+import time as time_module
 import concurrent.futures
 import multiprocessing
 import math
@@ -22,17 +23,6 @@ JACCARD_SIMILARITY_THRESHOLDS = {
     'notebook-manager': 0.7, 'pet-clinic': 0.7,
 }
 JACCARD_SIMILARITY_THRESHOLD_FALLBACK = 0.7
-
-TOOL_FAILURE_PATTERNS = {
-    'schemathesis': [r'FAILURES?:\s*[1-9]', r'FAILED', r'AssertionError', r'schema.*violation'],
-    'restler': [r'bugs? found:\s*[1-9]', r'error.*count:\s*[1-9]', r'FAILED'],
-    'restestgen': [r'failures?:\s*[1-9]', r'errors?:\s*[1-9]', r'FAILED'],
-    'morest': [r'errors?:\s*[1-9]', r'FAILED'],
-    'arat-rl': [r'errors?:\s*[1-9]', r'FAILED'],
-    'deeprest': [r'errors?:\s*[1-9]', r'FAILED'],
-    'cats': [r'violations?:\s*[1-9]', r'errors?:\s*[1-9]', r'FAILED'],
-}
-GENERIC_FAILURE_PATTERNS = [r'failures?:\s*[1-9]', r'errors?:\s*[1-9]', r'FAILED', r'AssertionError', r'Exception']
 
 def collect_completed_runs():
     completed_runs = set()
@@ -90,6 +80,24 @@ def collect_summaries():
                             summaries.add(run_dir.path + '/summary.json')
     return summaries
 
+def parse_started_timestamp(path):
+    started_path = os.path.join(path, 'started.txt')
+    if not os.path.exists(started_path):
+        return None
+    try:
+        with open(started_path, 'r') as f:
+            content = f.read()
+        match = re.search(r'Run started on (.+?)\.\s*$', content, re.MULTILINE)
+        if not match:
+            return None
+        time_str = match.group(1).strip()
+        struct_time = time_module.strptime(time_str, "%a %b %d %H:%M:%S %Y")
+        return time_module.mktime(struct_time)
+    except Exception as e:
+        print(f" => [yellow]WARN[/yellow] Could not parse started.txt at {started_path}: {e}")
+        return None
+
+
 def parse_time_budget(file_path):
     with open(file_path, 'r') as f: content = f.read()
     match = re.search(r'Time budget:\s*(\d+)', content)
@@ -109,7 +117,7 @@ def extract_minimum_req_num():
                 result[api] = req_num
     return result
 
-def compute_stats_on_interactions(conn: sqlite3.Connection):
+def compute_stats_on_interactions(conn: sqlite3.Connection, mutant_id):
     cursor = conn.cursor()
     interactions_stats = {}
     interactions_stats['count'] = cursor.execute('SELECT COUNT(1) FROM interactions').fetchone()[0]
@@ -121,17 +129,20 @@ def compute_stats_on_interactions(conn: sqlite3.Connection):
     interactions_stats['covered_operations'] = cursor.execute('SELECT COUNT(DISTINCT operation_id) FROM interactions').fetchone()[0]
     interactions_stats['unique_5XX'] = cursor.execute('SELECT COUNT(DISTINCT error_bucket_id) FROM interactions').fetchone()[0]
 
-    total_executed = cursor.execute('SELECT COUNT(DISTINCT mutant_id) FROM interactions WHERE mutant_id IS NOT NULL AND mutant_id != ""').fetchone()[0]
-    killed = cursor.execute('SELECT COUNT(DISTINCT mutant_id) FROM interactions WHERE mutant_id IS NOT NULL AND mutant_id != "" AND is_killed = 1').fetchone()[0]
-    survived = cursor.execute('SELECT COUNT(DISTINCT mutant_id) FROM interactions WHERE mutant_id IS NOT NULL AND mutant_id != "" AND is_killed = 0').fetchone()[0]
-    unknown = cursor.execute('SELECT COUNT(DISTINCT mutant_id) FROM interactions WHERE mutant_id IS NOT NULL AND mutant_id != "" AND is_killed IS NULL').fetchone()[0]
+    # ---- Mutation reachability stats ----
+    if mutant_id:
+        hit_count = cursor.execute(
+            'SELECT COUNT(1) FROM interactions WHERE mutant_id = ?', (mutant_id,)
+        ).fetchone()[0]
+        first_hit_ts = cursor.execute(
+            'SELECT MIN(request_timestamp) FROM interactions WHERE mutant_id = ?', (mutant_id,)
+        ).fetchone()[0]
+        interactions_stats['hit_count'] = hit_count
+        interactions_stats['first_hit_timestamp'] = first_hit_ts
+    else:
+        interactions_stats['hit_count'] = 0
+        interactions_stats['first_hit_timestamp'] = None
 
-    interactions_stats['mutation_total_executed'] = total_executed
-    interactions_stats['mutation_killed'] = killed
-    interactions_stats['mutation_survived'] = survived
-    interactions_stats['mutation_unknown'] = unknown
-    denominator = killed + survived
-    interactions_stats['mutation_score'] = round((killed / denominator * 100), 2) if denominator > 0 else 0.0
     return interactions_stats
 
 def prepare_database(conn: sqlite3.Connection, count, total):
@@ -141,6 +152,7 @@ def prepare_database(conn: sqlite3.Connection, count, total):
         print(f" => [ERROR] ({count}/{total}) Missing interaction table.")
         return
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_interaction_response_status_code ON interactions (response_status_code ASC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_interaction_mutant_id ON interactions (mutant_id)")
     columns = ['operation_id', 'error_bucket_id']
     for column in columns:
         column_count = cursor.execute("SELECT COUNT(1) FROM pragma_table_info('interactions') WHERE name = ?", (column,)).fetchone()[0]
@@ -268,30 +280,39 @@ def compute_code_coverage_on_sample(path_to_csv):
                 covered_branch += int(items[6]); total_branch += int(items[6]) + int(items[5])
                 covered_line += int(items[8]); total_line += int(items[8]) + int(items[7])
                 covered_method += int(items[12]); total_method += int(items[12]) + int(items[11])
-    code_coverage['branch'] = covered_branch / total_branch
-    code_coverage['line'] = covered_line / total_line
-    code_coverage['method'] = covered_method / total_method
+    code_coverage['branch'] = covered_branch / total_branch if total_branch > 0 else 0
+    code_coverage['line'] = covered_line / total_line if total_line > 0 else 0
+    code_coverage['method'] = covered_method / total_method if total_method > 0 else 0
     return code_coverage
 
 def extract_code_coverage(path, conn: sqlite3.Connection):
     cursor = conn.cursor()
-    for file in os.listdir(path + common.CODE_COVERAGE_PATH):
+    cov_dir = path + common.CODE_COVERAGE_PATH
+    if not os.path.exists(cov_dir):
+        return
+    for file in os.listdir(cov_dir):
         if file.endswith('.csv'):
-            code_coverage = compute_code_coverage_on_sample(f'{path}/{common.CODE_COVERAGE_PATH}/{file}')
-            time = file.removeprefix('jacoco_').removesuffix('.csv').replace('.', ':')
-            cursor.execute('INSERT INTO code_coverage (sample_time, branch_coverage, line_coverage, method_coverage) VALUES (?, ?, ?, ?)', (time, code_coverage['branch'], code_coverage['line'], code_coverage['method']))
+            code_coverage = compute_code_coverage_on_sample(f'{cov_dir}/{file}')
+            time_str = file.removeprefix('jacoco_').removesuffix('.csv').replace('.', ':')
+            cursor.execute('INSERT INTO code_coverage (sample_time, branch_coverage, line_coverage, method_coverage) VALUES (?, ?, ?, ?)',
+                           (time_str, code_coverage['branch'], code_coverage['line'], code_coverage['method']))
     conn.commit()
 
 def get_final_coverage(conn: sqlite3.Connection):
     cursor = conn.cursor()
     code_coverage = cursor.execute("SELECT branch_coverage, line_coverage, method_coverage FROM code_coverage ORDER BY sample_time DESC LIMIT 1").fetchone()
+    if code_coverage is None:
+        return {'branch': 0.0, 'line': 0.0, 'method': 0.0}
     return {'branch': code_coverage[0], 'line': code_coverage[1], 'method': code_coverage[2]}
 
 def compute_cumulative_results(conn: sqlite3.Connection):
-    SAMPLE_STEP = 100
+    MAX_SAMPLE_STEP = 100
     cursor = conn.cursor()
-    i = SAMPLE_STEP
     upper_limit = cursor.execute('SELECT COUNT(1) FROM interactions').fetchone()[0]
+    if upper_limit == 0:
+        return
+    SAMPLE_STEP = min(MAX_SAMPLE_STEP, upper_limit)
+    i = SAMPLE_STEP
     while i <= upper_limit:
         successes = cursor.execute('SELECT COUNT(1) FROM interactions WHERE response_status_code >= 200 AND response_status_code < 300 AND id <= ?', (i,)).fetchone()[0]
         client_failures = cursor.execute('SELECT COUNT(1) FROM interactions WHERE response_status_code >= 400 AND response_status_code < 500 AND id <= ?', (i,)).fetchone()[0]
@@ -302,76 +323,97 @@ def compute_cumulative_results(conn: sqlite3.Connection):
         average_timestamp = round((timestamps[0] + timestamps[1]) / 2)
         string_time = datetime.datetime.fromtimestamp(average_timestamp, datetime.timezone.utc).isoformat()
         row = cursor.execute('SELECT branch_coverage, line_coverage, method_coverage, ABS(strftime("%s", sample_time) - strftime("%s", ?)) AS time_distance FROM code_coverage ORDER BY time_distance LIMIT 1', (string_time,)).fetchone()
+        if row is None:
+            i += SAMPLE_STEP
+            continue
         if row[3] > 5: print(" => [[yellow]-WARN[/yellow]] Code coverage sample too far away in time.")
         cursor.execute('INSERT INTO cumulative_results (interaction_number, request_time, success_count, client_error_count, server_error_count, operation_coverage, unique_faults, branch_coverage, line_coverage, method_coverage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (i, timestamps[0], successes, client_failures, server_failures, operations_coverage, unique_faults, row[0], row[1], row[2]))
         i += SAMPLE_STEP
     conn.commit()
 
-# --- MUTATION VERDICT LOGIC ---
 def load_campaign_data(path):
     campaign_path = os.path.join(path, 'campaign.json')
     if os.path.exists(campaign_path):
         with open(campaign_path, 'r') as f: return json.load(f)
     return None
 
-def read_tool_output(path):
-    tool_name = path.split('/')[-2] 
-    output = ""
-    logs_dir = os.path.join(path, common.LOGS_PATH.lstrip('/'))
-    if os.path.exists(logs_dir):
-        for fname in os.listdir(logs_dir):
-            fpath = os.path.join(logs_dir, fname)
-            if os.path.isfile(fpath):
-                try:
-                    with open(fpath, 'r', errors='ignore') as f: output += f.read() + "\n"
-                except: pass
-    return tool_name.lower(), output
 
-def evaluate_campaign_verdict(path, campaign_data):
-    if not campaign_data: return {'is_killed': None, 'reason': 'no_campaign_data', 'mutant_id': None, 'operator': None, 'taxonomy': None}
-    if campaign_data.get('mode') == 'baseline': return {'is_killed': None, 'reason': 'baseline', 'mutant_id': None, 'operator': None, 'taxonomy': None}
-    
+def evaluate_time_to_hit(path, campaign_data, interactions_stats):
+    """
+    Computes the time-to-hit metric for the active mutant in this campaign.
+
+    Returns a dict with:
+        reached            : bool (did the tool ever request the mutated endpoint?)
+        time_to_first_hit  : float seconds (None if not reached)
+        hit_count          : int (how many times the endpoint was hit with the mutant)
+        is_killed          : bool (new definition: equals reached)
+    """
+    if not campaign_data or campaign_data.get('mode') == 'baseline':
+        return {
+            'reached': False,
+            'time_to_first_hit': None,
+            'hit_count': 0,
+            'is_killed': False,
+            'reason': 'baseline_or_no_campaign'
+        }
+
     mutant = campaign_data.get('mutant', {})
     mutant_id = mutant.get('id', 'unknown')
-    operator = mutant.get('operator', 'unknown')
-    taxonomy = mutant.get('taxonomy', 'unknown')
 
-    # Check if mutant was injected
-    proxy_log_path = os.path.join(path, 'proxy.exec.jsonl')
-    mutant_executed = False
-    if os.path.exists(proxy_log_path):
-        with open(proxy_log_path, 'r') as f:
-            for line in f:
-                if '"status": "EXECUTED"' in line and f'"mutant_id": "{mutant_id}"' in line:
-                    mutant_executed = True
-                    break
-    
-    if not mutant_executed:
-        db_path = os.path.join(path, common.DB_FILENAME)
-        if os.path.exists(db_path):
+    hit_count = interactions_stats.get('hit_count', 0)
+    first_hit_ts = interactions_stats.get('first_hit_timestamp')
+
+    # If the SQLite didn't capture the mutant_id (legacy bug), fall back to proxy.exec.jsonl
+    if hit_count == 0:
+        proxy_log_path = os.path.join(path, 'proxy.exec.jsonl')
+        if os.path.exists(proxy_log_path):
+            proxy_hits = 0
+            first_proxy_ts = None
             try:
-                conn = sqlite3.connect(db_path)
-                if conn.cursor().execute('SELECT COUNT(1) FROM interactions WHERE mutant_id = ?', (mutant_id,)).fetchone()[0] > 0:
-                    mutant_executed = True
-                conn.close()
+                with open(proxy_log_path, 'r') as f:
+                    for line in f:
+                        if '"status": "EXECUTED"' in line and f'"mutant_id": "{mutant_id}"' in line:
+                            proxy_hits += 1
+                            if first_proxy_ts is None:
+                                try:
+                                    entry = json.loads(line)
+                                    first_proxy_ts = entry.get('timestamp')
+                                except: pass
+                if proxy_hits > 0:
+                    hit_count = proxy_hits
+                    first_hit_ts = first_proxy_ts
             except: pass
 
-    if not mutant_executed:
-        return {'is_killed': None, 'reason': 'no_coverage', 'mutant_id': mutant_id, 'operator': operator, 'taxonomy': taxonomy}
+    reached = hit_count > 0
 
-    tool_name, tool_output = read_tool_output(path)
-    patterns = TOOL_FAILURE_PATTERNS.get(tool_name, GENERIC_FAILURE_PATTERNS)
-    for pattern in patterns:
-        if re.search(pattern, tool_output, re.IGNORECASE):
-            return {'is_killed': True, 'reason': f'tool_failure ({pattern})', 'mutant_id': mutant_id, 'operator': operator, 'taxonomy': taxonomy}
+    # Compute time-to-first-hit (in seconds from run start)
+    time_to_first_hit = None
+    if reached and first_hit_ts is not None:
+        start_ts = parse_started_timestamp(path)
+        if start_ts is not None:
+            time_to_first_hit = round(first_hit_ts - start_ts, 3)
+            # Sanity: if negative (clock skew), clamp to 0
+            if time_to_first_hit < 0:
+                time_to_first_hit = 0.0
 
-    return {'is_killed': False, 'reason': 'survived', 'mutant_id': mutant_id, 'operator': operator, 'taxonomy': taxonomy}
+    reason = 'reached' if reached else 'not_reached_within_budget'
 
-def apply_verdict_to_database(conn: sqlite3.Connection, verdict):
-    if verdict['is_killed'] is None or verdict['mutant_id'] is None: return
+    return {
+        'reached': reached,
+        'time_to_first_hit': time_to_first_hit,
+        'hit_count': hit_count,
+        'is_killed': reached,   # NEW DEFINITION: kill == reached
+        'reason': reason
+    }
+
+
+def apply_reachability_to_database(conn: sqlite3.Connection, mutant_id, reached):
+    """Tag every row with this mutant_id as killed=1 (reached) or 0 (not reached)."""
+    if not mutant_id:
+        return
     cursor = conn.cursor()
-    kill_value = 1 if verdict['is_killed'] else 0
-    cursor.execute('UPDATE interactions SET is_killed = ? WHERE mutant_id = ?', (kill_value, verdict['mutant_id']))
+    kill_value = 1 if reached else 0
+    cursor.execute('UPDATE interactions SET is_killed = ? WHERE mutant_id = ?', (kill_value, mutant_id))
     conn.commit()
 
 def compute_mutation_coverage(path, interactions_stats):
@@ -385,9 +427,11 @@ def compute_mutation_coverage(path, interactions_stats):
                     try:
                         if json.loads(line).get('mode') != 'baseline': total_generated += 1
                     except: pass
-    executed = interactions_stats.get('mutation_total_executed', 0)
+    reached_count = 1 if interactions_stats.get('hit_count', 0) > 0 else 0
     interactions_stats['mutation_total_generated'] = total_generated
-    interactions_stats['mutation_coverage'] = round((executed / total_generated * 100), 2) if total_generated > 0 else 0.0
+    # Per-run "coverage" is just 0 or 1, but the aggregate CSV will compute the overall rate
+    interactions_stats['mutation_reached'] = reached_count
+
 
 def process_runs(paths):
     threads = math.floor(multiprocessing.cpu_count() * 0.9)
@@ -404,25 +448,71 @@ def process_runs(paths):
 
     results_time = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
 
-    # Time Budget CSV
+    # CSV HEADER
+    header = [
+        'api', 'tool', 'run',
+        'campaign_id', 'mutant_id', 'mutant_operator', 'mutant_taxonomy',
+        'reached', 'time_to_first_hit_sec', 'hit_count', 'reachability_reason',
+        'interactions', '2XX', '4XX', '5XX', 'covered_operations', 'unique_5XX',
+        'mut_total_generated',
+        'branch_cov', 'line_cov', 'method_cov',
+        'area_2XX', 'area_4XX', 'area_5XX', 'area_ops', 'area_faults',
+        'area_branch', 'area_line', 'area_method'
+    ]
+
     summaries = collect_summaries()
     with open(f"{common.RESTGYM_BASE_DIR}/results/time_budget_aggregated_results_{results_time}.csv", mode='w', newline='') as aggregate_file:
         writer = csv.writer(aggregate_file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        writer.writerow(['api', 'tool', 'run', 'campaign_id', 'mutant_id', 'mutant_operator', 'mutant_taxonomy', 'is_killed', 'kill_reason', 'interactions', '2XX', '4XX', '5XX', 'covered_operations', 'unique_5XX', 'mut_total_gen', 'mut_executed', 'mut_killed', 'mut_survived', 'mut_unknown', 'mut_score', 'mut_coverage', 'branch_cov', 'line_cov', 'method_cov', 'area_2XX', 'area_4XX', 'area_5XX', 'area_ops', 'area_faults', 'area_branch', 'area_line', 'area_method'])
+        writer.writerow(header)
         for summary in summaries:
             api_info = summary.split('/')
             conn = sqlite3.connect(str(summary).replace("summary.json", common.DB_FILENAME))
-            aucs = conn.cursor().execute("WITH pairs AS (SELECT LAG(request_time) OVER (ORDER BY request_time) AS t1, request_time AS t2, success_count, LAG(success_count) OVER (ORDER BY request_time) AS success1, client_error_count, LAG(client_error_count) OVER (ORDER BY request_time) AS client1, server_error_count, LAG(server_error_count) OVER (ORDER BY request_time) AS server1, operation_coverage, LAG(operation_coverage) OVER (ORDER BY request_time) AS coverage1, unique_faults, LAG(unique_faults) OVER (ORDER BY request_time) AS faults1, branch_coverage, LAG(branch_coverage) OVER (ORDER BY request_time) AS branch1, line_coverage, LAG(line_coverage) OVER (ORDER BY request_time) AS line1, method_coverage, LAG(method_coverage) OVER (ORDER BY request_time) AS method1 FROM cumulative_results) SELECT SUM((success1 + success_count) / 2.0 * (t2 - t1)), SUM((client1 + client_error_count) / 2.0 * (t2 - t1)), SUM((server1 + server_error_count) / 2.0 * (t2 - t1)), SUM((coverage1 + operation_coverage) / 2.0 * (t2 - t1)), SUM((faults1 + unique_faults) / 2.0 * (t2 - t1)), SUM((branch1 + branch_coverage) / 2.0 * (t2 - t1)), SUM((line1 + line_coverage) / 2.0 * (t2 - t1)), SUM((method1 + method_coverage) / 2.0 * (t2 - t1)) FROM pairs WHERE t1 IS NOT NULL;").fetchone() or (0,)*8
+            aucs = conn.cursor().execute("""
+                WITH pairs AS (
+                    SELECT LAG(request_time) OVER (ORDER BY request_time) AS t1, request_time AS t2,
+                           success_count, LAG(success_count) OVER (ORDER BY request_time) AS success1,
+                           client_error_count, LAG(client_error_count) OVER (ORDER BY request_time) AS client1,
+                           server_error_count, LAG(server_error_count) OVER (ORDER BY request_time) AS server1,
+                           operation_coverage, LAG(operation_coverage) OVER (ORDER BY request_time) AS coverage1,
+                           unique_faults, LAG(unique_faults) OVER (ORDER BY request_time) AS faults1,
+                           branch_coverage, LAG(branch_coverage) OVER (ORDER BY request_time) AS branch1,
+                           line_coverage, LAG(line_coverage) OVER (ORDER BY request_time) AS line1,
+                           method_coverage, LAG(method_coverage) OVER (ORDER BY request_time) AS method1
+                    FROM cumulative_results
+                )
+                SELECT SUM((success1 + success_count) / 2.0 * (t2 - t1)),
+                       SUM((client1 + client_error_count) / 2.0 * (t2 - t1)),
+                       SUM((server1 + server_error_count) / 2.0 * (t2 - t1)),
+                       SUM((coverage1 + operation_coverage) / 2.0 * (t2 - t1)),
+                       SUM((faults1 + unique_faults) / 2.0 * (t2 - t1)),
+                       SUM((branch1 + branch_coverage) / 2.0 * (t2 - t1)),
+                       SUM((line1 + line_coverage) / 2.0 * (t2 - t1)),
+                       SUM((method1 + method_coverage) / 2.0 * (t2 - t1))
+                FROM pairs WHERE t1 IS NOT NULL;
+            """).fetchone() or (0,)*8
             conn.close()
             with open(summary) as f: d = json.load(f)
-            v = d.get('mutation_verdict', {}); i = d.get('interactions', {}); c = d.get('final_code_coverage', {})
-            writer.writerow([api_info[-4], api_info[-3], api_info[-2], v.get('campaign_id', ''), v.get('mutant_id', ''), v.get('operator', ''), v.get('taxonomy', ''), v.get('is_killed', ''), v.get('reason', ''), i.get('count', 0), i.get('2XX', 0), i.get('4XX', 0), i.get('5XX', 0), i.get('covered_operations', 0), i.get('unique_5XX', 0), i.get('mutation_total_generated', 0), i.get('mutation_total_executed', 0), i.get('mutation_killed', 0), i.get('mutation_survived', 0), i.get('mutation_unknown', 0), i.get('mutation_score', 0.0), i.get('mutation_coverage', 0.0), c.get('branch', 0.0), c.get('line', 0.0), c.get('method', 0.0), aucs[0], aucs[1], aucs[2], aucs[3], aucs[4], aucs[5], aucs[6], aucs[7]])
+            v = d.get('mutation_verdict', {})
+            i = d.get('interactions', {})
+            c = d.get('final_code_coverage', {})
+            writer.writerow([
+                api_info[-4], api_info[-3], api_info[-2],
+                v.get('campaign_id', ''), v.get('mutant_id', ''), v.get('operator', ''), v.get('taxonomy', ''),
+                v.get('reached', False),
+                v.get('time_to_first_hit'),
+                v.get('hit_count', 0),
+                v.get('reason', ''),
+                i.get('count', 0), i.get('2XX', 0), i.get('4XX', 0), i.get('5XX', 0),
+                i.get('covered_operations', 0), i.get('unique_5XX', 0),
+                i.get('mutation_total_generated', 0),
+                c.get('branch', 0.0), c.get('line', 0.0), c.get('method', 0.0),
+                aucs[0], aucs[1], aucs[2], aucs[3], aucs[4], aucs[5], aucs[6], aucs[7]
+            ])
 
-    # Request Budget CSV
     minimums = extract_minimum_req_num()
     with open(f"{common.RESTGYM_BASE_DIR}/results/request_budget_aggregate_results_{results_time}.csv", mode='w', newline='') as aggregate_file:
         writer = csv.writer(aggregate_file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        writer.writerow(['api', 'tool', 'run', 'campaign_id', 'mutant_id', 'mutant_operator', 'mutant_taxonomy', 'is_killed', 'kill_reason', 'interactions', '2XX', '4XX', '5XX', 'covered_operations', 'unique_5XX', 'mut_total_gen', 'mut_executed', 'mut_killed', 'mut_survived', 'mut_unknown', 'mut_score', 'mut_coverage', 'branch_cov', 'line_cov', 'method_cov', 'area_2XX', 'area_4XX', 'area_5XX', 'area_ops', 'area_faults', 'area_branch', 'area_line', 'area_method'])
+        writer.writerow(header)
         for processed_run in collect_processed_runs():
             api_info = processed_run.split('/')
             api_name = api_info[-3]
@@ -430,12 +520,40 @@ def process_runs(paths):
             if min_req == 0: continue
             conn = sqlite3.connect(processed_run + '/' + common.DB_FILENAME)
             result = conn.cursor().execute("SELECT * FROM cumulative_results WHERE interaction_number = ?", (min_req,)).fetchone()
-            if result is None: result = conn.cursor().execute("SELECT * FROM cumulative_results ORDER BY interaction_number DESC LIMIT 1").fetchone()
+            if result is None: 
+                result = conn.cursor().execute("SELECT * FROM cumulative_results ORDER BY interaction_number DESC LIMIT 1").fetchone()
+            if result is None:
+                result = (0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0)
             area = conn.cursor().execute('SELECT SUM(success_count), SUM(client_error_count), SUM(server_error_count), SUM(operation_coverage), SUM(unique_faults), SUM(branch_coverage), SUM(line_coverage), SUM(method_coverage) FROM cumulative_results WHERE interaction_number <= ?', (min_req,)).fetchone()
             conn.close()
+            if area:
+                area = tuple(0 if x is None else x for x in area)
+            else:
+                area = (0, 0, 0, 0, 0, 0, 0, 0)
             with open(processed_run + '/summary.json') as f: d = json.load(f)
-            v = d.get('mutation_verdict', {}); i = d.get('interactions', {})
-            writer.writerow([api_name, api_info[-2], api_info[-1], v.get('campaign_id', ''), v.get('mutant_id', ''), v.get('operator', ''), v.get('taxonomy', ''), v.get('is_killed', ''), v.get('reason', ''), result[1], result[3], result[4], result[5], result[6], result[7], i.get('mutation_total_generated', 0), i.get('mutation_total_executed', 0), i.get('mutation_killed', 0), i.get('mutation_survived', 0), i.get('mutation_unknown', 0), i.get('mutation_score', 0.0), i.get('mutation_coverage', 0.0), result[8], result[9], result[10], area[0]/min_req, area[1]/min_req, area[2]/min_req, area[3]/min_req, area[4]/min_req, area[5]/min_req, area[6]/min_req, area[7]/min_req])
+            v = d.get('mutation_verdict', {})
+            i = d.get('interactions', {})
+            c = d.get('final_code_coverage', {})
+            writer.writerow([
+                api_name, api_info[-2], api_info[-1],
+                v.get('campaign_id', ''), v.get('mutant_id', ''), v.get('operator', ''), v.get('taxonomy', ''),
+                v.get('reached', False),
+                v.get('time_to_first_hit'),
+                v.get('hit_count', 0),
+                v.get('reason', ''),
+                result[1], result[3], result[4], result[5], result[6], result[7],
+                i.get('mutation_total_generated', 0),
+                result[8], result[9], result[10],
+                area[0]/min_req if area[0] else 0,
+                area[1]/min_req if area[1] else 0,
+                area[2]/min_req if area[2] else 0,
+                area[3]/min_req if area[3] else 0,
+                area[4]/min_req if area[4] else 0,
+                area[5]/min_req if area[5] else 0,
+                area[6]/min_req if area[6] else 0,
+                area[7]/min_req if area[7] else 0,
+            ])
+
     print("[green]Aggregated results saved to CSV files.[/green]")
 
 def process_run(path, count, total, progress, task):
@@ -444,13 +562,21 @@ def process_run(path, count, total, progress, task):
     prepare_database(conn, count, total); progress.update(task, advance=1)
     extract_operation_id_from_interaction(path, conn, count, total); progress.update(task, advance=1)
     bucket_unique_5xx(path, conn, count, total); progress.update(task, advance=1)
-    
+
     campaign_data = load_campaign_data(path)
-    verdict = evaluate_campaign_verdict(path, campaign_data)
-    apply_verdict_to_database(conn, verdict); progress.update(task, advance=1)
-    
+    mutant_id = None
+    if campaign_data and campaign_data.get('mode') != 'baseline':
+        mutant_id = campaign_data.get('mutant', {}).get('id')
+
+    # Compute base interaction stats + hit_count for this mutant
+    interactions_stats = compute_stats_on_interactions(conn, mutant_id); progress.update(task, advance=1)
+
+    # NCompute time-to-hit and reachability verdict
+    verdict = evaluate_time_to_hit(path, campaign_data, interactions_stats)
+    apply_reachability_to_database(conn, mutant_id, verdict.get('reached', False))
+    progress.update(task, advance=1)
+
     extract_code_coverage(path, conn); progress.update(task, advance=1)
-    interactions_stats = compute_stats_on_interactions(conn); progress.update(task, advance=1)
     compute_mutation_coverage(path, interactions_stats); progress.update(task, advance=1)
     final_code_coverage = get_final_coverage(conn); progress.update(task, advance=1)
     compute_cumulative_results(conn); progress.update(task, advance=1)
@@ -459,9 +585,15 @@ def process_run(path, count, total, progress, task):
         'interactions': interactions_stats,
         'final_code_coverage': final_code_coverage,
         'mutation_verdict': {
-            'campaign_id': campaign_data.get('campaign_id', 'unknown') if campaign_data else None,
-            'mutant_id': verdict.get('mutant_id'), 'operator': verdict.get('operator'),
-            'taxonomy': verdict.get('taxonomy'), 'is_killed': verdict.get('is_killed'), 'reason': verdict.get('reason'),
+            'campaign_id': campaign_data.get('campaign_id', 'baseline') if campaign_data else None,
+            'mutant_id': mutant_id,
+            'operator': campaign_data.get('mutant', {}).get('operator') if campaign_data else None,
+            'taxonomy': campaign_data.get('mutant', {}).get('taxonomy') if campaign_data else None,
+            'reached': verdict.get('reached'),
+            'time_to_first_hit': verdict.get('time_to_first_hit'),
+            'hit_count': verdict.get('hit_count'),
+            'is_killed': verdict.get('is_killed'),
+            'reason': verdict.get('reason'),
         }
     }
     with open(path+'/summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, ensure_ascii=False, indent=4)

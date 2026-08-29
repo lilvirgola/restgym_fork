@@ -231,7 +231,7 @@ def launch_run(api, tool, campaign, run_count, total_runs, progress, experiment_
         run = 'run-' + time.strftime('%Y%m%d-%H%M%S')
         results_path = f'{common.RESTGYM_BASE_DIR}/results/{api}/{tool}/{run}'
         
-        ports = {'9090/tcp': get_random_free_tcp_port()}
+        ports = {'9090/tcp': None}
         env = {
             'API': api, 'TOOL': tool, 'RUN': run,
             'TIME_BUDGET': TIME_BUDGET_MINS, 'HOST': 'localhost',
