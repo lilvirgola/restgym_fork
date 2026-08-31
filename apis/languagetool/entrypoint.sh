@@ -21,7 +21,7 @@ fi
 
 # Start mitmproxy in background
 # Note: The port for the reverse proxy has been changed from 8080 to 8081 cos' the creator wanted to differ apparently, i hate him
-uv run mitmdump -p 9090 --mode reverse:http://127.0.0.1:8081/ \ 
+uv run mitmdump -p 9090 --mode reverse:http://127.0.0.1:8081/ \
   -s /infrastructure/mitmproxy/store-interactions/store-interactions.py \
   -s /infrastructure/mitmproxy/mutations/src/mitm_proxy_plugin/addon.py \
   --set openapi_spec=/api/specifications/${API}-openapi.json \

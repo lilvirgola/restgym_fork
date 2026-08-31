@@ -75,6 +75,15 @@ case "$1" in
     exec $DOCKER_BASE_COMMAND python3 src/process_results.py
     ;;
 
+  # Plot results from aggregated CSV files
+  plot-results|p)
+    NEW_NAME="restgym-result-plotter"
+    DOCKER_BASE_COMMAND=$(echo "$DOCKER_BASE_COMMAND" | sed "s|--name restgym|--name $NEW_NAME|")
+    # Forward any extra arguments (e.g., a specific CSV path) to the script
+    shift
+    exec $DOCKER_BASE_COMMAND python3 src/plot_results.py "$@"
+    ;;
+
 
   # Stops all RESTgym-related containers
   force-stop|s)
@@ -107,7 +116,7 @@ case "$1" in
 
 
   *)
-    echo "Usage: $0 {build-images|b|launch-experiment|l|verify-data|v|analyze-data|a|force-stop|s|remove|r|version}" >&2
+    echo "Usage: $0 {build-images|b|launch-experiment|l|verify-data|v|analyze-data|a|plot-results|p|force-stop|s|remove|r|version}" >&2
     exit 1
     ;;
 esac
