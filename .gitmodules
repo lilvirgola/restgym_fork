@@ -1,6 +1,3 @@
-[submodule "apis/blog"]
-	path = apis/blog
-	url = git@github.com:restgym/blog-api.git
 [submodule "apis/erc20"]
 	path = apis/erc20
 	url = git@github.com:restgym/erc20-api.git
