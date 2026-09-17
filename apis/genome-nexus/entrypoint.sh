@@ -1,11 +1,21 @@
 #!/bin/sh
 set -e
 
-# 1. FIX: Create the results AND logs directories
+# Create the results AND logs directories
 mkdir -p "/results/$API/$TOOL/$RUN/logs"
 
-# Start MongoDB.
-/startup.sh &
+# Start MongoDB
+mongod --bind_ip 127.0.0.1 --dbpath /data/db \
+    > /results/$API/$TOOL/$RUN/logs/mongodb.log 2>&1 &
+
+# Wait until MongoDB is ready
+until mongosh --quiet \
+    --eval 'db.runCommand({ ping: 1 }).ok' \
+    2>/dev/null | grep -q 1
+do
+    sleep 1
+done
+
 
 # Start JaCoCo collector in background
 sh /infrastructure/jacoco/collect-coverage-interval.sh &

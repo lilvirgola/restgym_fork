@@ -1,32 +1,34 @@
-FROM ghcr.io/astral-sh/uv:0.12.2 AS uv
+FROM restgym/genome-nexus-api:1.0.0 AS base
 
-# Makeing this work was hell :')
-FROM python:3.12-slim AS builder
+FROM mongo:7.0
 
-COPY --from=uv /uv /uvx /usr/local/bin/
+ENV API=genome-nexus
+ENV DEBIAN_FRONTEND=noninteractive
 
-WORKDIR /build
+RUN mkdir -p /api \
+    /results \
+    /infrastructure
 
-COPY infrastructure/mitmproxy/mutations/ .
+# Copy Genome Nexus application artifacts from the old image
+COPY --from=base /api/ /api/
 
-RUN uv venv --python 3.12 --clear /build/.venv
+COPY --from=base /api/specifications/ /specifications/
 
-RUN uv sync --frozen --no-dev
+# Copy our infrastructure
+COPY ./infrastructure/ /infrastructure/
 
-FROM restgym/genome-nexus-api:1.0.0
+# Entrypoint
+COPY ./apis/genome-nexus/entrypoint.sh /entrypoint.sh
 
-USER root
+# uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.2 /uv /uvx /bin/
 
-# Copy only the already-built environment.
-COPY --from=builder /build/.venv /opt/mutation-venv
-
-COPY infrastructure/mitmproxy/mutations \
-    /infrastructure/mitmproxy/mutations
-
-COPY apis/genome-nexus/entrypoint.sh /entrypoint.sh
-
-RUN chmod +x /entrypoint.sh
-
-ENV PATH="/opt/mutation-venv/bin:${PATH}"
+RUN chmod +x /entrypoint.sh \
+    /infrastructure/jacoco/*.sh \
+    && apt-get update \
+    && apt-get install -y \
+        openjdk-11-jdk \
+    && cd /infrastructure/mitmproxy/mutations && uv sync \
+    && rm -rf /var/lib/apt/lists/*
 
 ENTRYPOINT ["/entrypoint.sh"]

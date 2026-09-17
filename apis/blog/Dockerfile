@@ -10,11 +10,13 @@ RUN mkdir /api && \
 COPY ./apis/blog/ /api/
 COPY ./infrastructure/ /infrastructure/
 COPY ./apis/blog/entrypoint.sh /entrypoint.sh
+COPY --from=ghcr.io/astral-sh/uv:0.12.2 /uv /uvx /bin/
 
 RUN chmod +x /entrypoint.sh && \
     apt update && \
     apt -y upgrade && \
-    apt -y install openjdk-11-jdk mysql-server mitmproxy python3-requests && \
+    apt -y install openjdk-11-jdk mysql-server && \
+    cd /infrastructure/mitmproxy/mutations && uv sync && \
     usermod -d /var/lib/mysql/ mysql && \
     /etc/init.d/mysql start && \
     mysql -e "CREATE DATABASE blogapi" && \
