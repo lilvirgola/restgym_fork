@@ -18,7 +18,9 @@ class StoreInteractions:
             self.init_sqlite()
             ctx.log.info("StoreInteractions: initialized successfully")
         except Exception as e:
-            ctx.log.error(f"StoreInteractions: initialization failed: {e}")
+            ctx.log.error(
+                f"StoreInteractions: initialization failed: {e}"
+            )
             raise
 
     def open_sqlite(self):
@@ -26,14 +28,15 @@ class StoreInteractions:
         tool = os.environ.get("TOOL", "default")
         run = os.environ.get("RUN", "default")
 
-        db_path = (
-            f"/results/{api}/{tool}/{run}/results.db"
-        )
+        db_path = f"/results/{api}/{tool}/{run}/results.db"
 
         ctx.log.info(f"Opening SQLite database: {db_path}")
 
         try:
-            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            os.makedirs(
+                os.path.dirname(db_path),
+                exist_ok=True,
+            )
             conn = sqlite3.connect(db_path)
             ctx.log.info("SQLite connection established")
             return conn
@@ -47,7 +50,8 @@ class StoreInteractions:
         ctx.log.info("Initializing SQLite schema")
 
         try:
-            self.cursor.execute("""
+            self.cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS interactions (
                     id INTEGER PRIMARY KEY,
                     request_method TEXT,
@@ -55,24 +59,25 @@ class StoreInteractions:
                     request_headers TEXT,
                     request_content TEXT,
                     request_timestamp REAL,
-
                     response_status_code INTEGER,
                     response_headers TEXT,
                     response_content TEXT,
                     response_timestamp REAL,
-
                     mutant_id TEXT,
                     mutant_operator TEXT,
-                    mutant_taxonomy TEXT,
-                    is_killed INTEGER
+                    mutant_taxonomy TEXT
                 )
-            """)
+                """
+            )
 
             self.conn.commit()
 
             ctx.log.info("SQLite schema initialized")
+
         except Exception as e:
-            ctx.log.error(f"Failed to initialize SQLite schema: {e}")
+            ctx.log.error(
+                f"Failed to initialize SQLite schema: {e}"
+            )
             raise
 
     def response(self, flow):
@@ -159,40 +164,39 @@ class StoreInteractions:
             # --- Database ---
             ctx.log.info("Inserting interaction into SQLite")
 
-            self.cursor.execute("""
+            self.cursor.execute(
+                """
                 INSERT INTO interactions (
                     request_method,
                     request_path,
                     request_headers,
                     request_content,
                     request_timestamp,
-
                     response_status_code,
                     response_headers,
                     response_content,
                     response_timestamp,
-
                     mutant_id,
                     mutant_operator,
                     mutant_taxonomy
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                flow.request.method,
-                flow.request.path,
-                req_headers,
-                req_content,
-                flow.request.timestamp_start,
-
-                res_status,
-                res_headers,
-                res_content,
-                res_time,
-
-                m_id,
-                m_op,
-                m_tax,
-            ))
+                """,
+                (
+                    flow.request.method,
+                    flow.request.path,
+                    req_headers,
+                    req_content,
+                    flow.request.timestamp_start,
+                    res_status,
+                    res_headers,
+                    res_content,
+                    res_time,
+                    m_id,
+                    m_op,
+                    m_tax,
+                ),
+            )
 
             self.count += 1
 
@@ -212,7 +216,6 @@ class StoreInteractions:
                 f"{flow.request.method} {flow.request.path}: {e}"
             )
 
-            # This logs the full traceback in mitmproxy.
             ctx.log.error(
                 "Interaction processing exception",
                 exc_info=True,
