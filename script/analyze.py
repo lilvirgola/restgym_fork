@@ -610,7 +610,8 @@ def tool_reachability_chi_square(df: pd.DataFrame) -> dict:
 
 
 def fault_type_chi_square(df: pd.DataFrame) -> dict:
-    table = pd.crosstab(df["mutant_operator"], df["is_reached"])
+    col = "mutant_taxonomy" if "mutant_taxonomy" in df.columns else "mutant_operator"
+    table = pd.crosstab(df[col], df["is_reached"])
     if table.shape[0] < 2 or table.shape[1] < 2:
         return {"n": np.nan, "statistic": np.nan, "dof": np.nan, "p_value": np.nan}
     chi2, p_value, dof, _ = chi2_contingency(table)
